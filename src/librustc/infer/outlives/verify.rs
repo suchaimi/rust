@@ -2,7 +2,7 @@ use crate::infer::outlives::env::RegionBoundPairs;
 use crate::infer::{GenericKind, VerifyBound};
 use crate::traits;
 use crate::ty::subst::{InternalSubsts, Subst};
-use crate::ty::{self, Ty, TyCtxt};
+use crate::ty::{self, Ty, TyCtxt, View};
 use rustc_data_structures::captures::Captures;
 use rustc_hir::def_id::DefId;
 
@@ -39,22 +39,20 @@ impl<'cx, 'tcx> VerifyBoundCx<'cx, 'tcx> {
     }
 
     fn type_bound(&self, ty: Ty<'tcx>) -> VerifyBound<'tcx> {
-        match ty.kind {
-            ty::Param(p) => self.param_bound(p),
-            ty::Projection(data) => self.projection_bound(data),
+        match ty.into() {
+            ty::view::Param(p) => self.param_bound(p),
+            ty::view::Projection(data) => self.projection_bound(data),
             _ => self.recursive_type_bound(ty),
         }
     }
 
-    fn param_bound(&self, param_ty: ty::ParamTy) -> VerifyBound<'tcx> {
+    fn param_bound(&self, param_ty: View<'tcx, ty::ParamTy>) -> VerifyBound<'tcx> {
         debug!("param_bound(param_ty={:?})", param_ty);
 
         // Start with anything like `T: 'a` we can scrape from the
         // environment
-        let param_bounds = self
-            .declared_generic_bounds_from_env(GenericKind::Param(param_ty))
-            .into_iter()
-            .map(|outlives| outlives.1);
+        let param_bounds =
+            self.declared_generic_bounds_from_env(param_ty).into_iter().map(|outlives| outlives.1);
 
         // Add in the default bound of fn body that applies to all in
         // scope type parameters:
@@ -78,9 +76,9 @@ impl<'cx, 'tcx> VerifyBoundCx<'cx, 'tcx> {
     /// this list.
     pub fn projection_approx_declared_bounds_from_env(
         &self,
-        projection_ty: ty::ProjectionTy<'tcx>,
+        projection_ty: ty::View<'tcx, ty::ProjectionTy<'tcx>>,
     ) -> Vec<ty::OutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>>> {
-        let projection_ty = GenericKind::Projection(projection_ty).to_ty(self.tcx);
+        let projection_ty = projection_ty.as_ty();
         let erased_projection_ty = self.tcx.erase_regions(&projection_ty);
         self.declared_generic_bounds_from_env_with_compare_fn(|ty| {
             if let ty::Projection(..) = ty.kind {
@@ -97,16 +95,18 @@ impl<'cx, 'tcx> VerifyBoundCx<'cx, 'tcx> {
     /// exact match.
     pub fn projection_declared_bounds_from_trait(
         &self,
-        projection_ty: ty::ProjectionTy<'tcx>,
+        projection_ty: ty::View<'tcx, ty::ProjectionTy<'tcx>>,
     ) -> impl Iterator<Item = ty::Region<'tcx>> + 'cx + Captures<'tcx> {
         self.declared_projection_bounds_from_trait(projection_ty)
     }
 
-    pub fn projection_bound(&self, projection_ty: ty::ProjectionTy<'tcx>) -> VerifyBound<'tcx> {
+    pub fn projection_bound(
+        &self,
+        projection_ty: ty::View<'tcx, ty::ProjectionTy<'tcx>>,
+    ) -> VerifyBound<'tcx> {
         debug!("projection_bound(projection_ty={:?})", projection_ty);
 
-        let projection_ty_as_ty =
-            self.tcx.mk_projection(projection_ty.item_def_id, projection_ty.substs);
+        let projection_ty_as_ty = projection_ty.as_ty();
 
         // Search the env for where clauses like `P: 'a`.
         let env_bounds = self
@@ -161,9 +161,9 @@ impl<'cx, 'tcx> VerifyBoundCx<'cx, 'tcx> {
     /// bounds, but all the bounds it returns can be relied upon.
     fn declared_generic_bounds_from_env(
         &self,
-        generic: GenericKind<'tcx>,
+        generic: View<'tcx, ty::ParamTy>,
     ) -> Vec<ty::OutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>>> {
-        let generic_ty = generic.to_ty(self.tcx);
+        let generic_ty = generic.as_ty();
         self.declared_generic_bounds_from_env_with_compare_fn(|ty| ty == generic_ty)
     }
 
@@ -171,8 +171,6 @@ impl<'cx, 'tcx> VerifyBoundCx<'cx, 'tcx> {
         &self,
         compare_ty: impl Fn(Ty<'tcx>) -> bool,
     ) -> Vec<ty::OutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>>> {
-        let tcx = self.tcx;
-
         // To start, collect bounds from user environment. Note that
         // parameter environments are already elaborated, so we don't
         // have to worry about that. Comparing using `==` is a bit
@@ -198,7 +196,7 @@ impl<'cx, 'tcx> VerifyBoundCx<'cx, 'tcx> {
                 "declared_generic_bounds_from_env_with_compare_fn: region_bound_pair = {:?}",
                 (r, p)
             );
-            let p_ty = p.to_ty(tcx);
+            let p_ty = p.as_ty();
             compare_ty(p_ty).then_some(ty::OutlivesPredicate(p_ty, r))
         });
 
@@ -227,7 +225,7 @@ impl<'cx, 'tcx> VerifyBoundCx<'cx, 'tcx> {
     /// `region_bounds_declared_on_associated_item`.
     fn declared_projection_bounds_from_trait(
         &self,
-        projection_ty: ty::ProjectionTy<'tcx>,
+        projection_ty: ty::View<'tcx, ty::ProjectionTy<'tcx>>,
     ) -> impl Iterator<Item = ty::Region<'tcx>> + 'cx + Captures<'tcx> {
         debug!("projection_bounds(projection_ty={:?})", projection_ty);
         let tcx = self.tcx;
